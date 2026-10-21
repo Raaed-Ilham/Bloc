@@ -633,24 +633,6 @@ export default function AboutSection() {
       </div>
 
       <div className="relative z-10 mx-auto flex min-h-[calc(100vh-6rem)] max-w-7xl flex-col justify-between">
-        {/* Header */}
-        <header className="grid grid-cols-12 gap-4 border-b border-[#d3d0c9]/60 pb-4 text-xs font-mono-meta">
-          <div className="col-span-6 text-sm font-bold tracking-tighter md:col-span-3">
-            STUDIO ARCH.®
-            <span className="block text-[10px] font-normal text-[#73716b]">
-              About & profile
-            </span>
-          </div>
-          <div className="col-span-6 text-right text-[#73716b] md:col-span-3 md:text-left">
-            Working globally
-            <span className="block text-[#121212]">Tokyo / Zürich</span>
-          </div>
-          <p className="col-span-12 mt-4 text-right text-xs leading-relaxed text-[#73716b] md:col-span-6 md:mt-0">
-            Plant daddy, married to a brilliant designer, three cats call him
-            dad.
-          </p>
-        </header>
-
         {/* Stage Center */}
         <div className="relative my-12 flex min-h-[460px] items-center justify-center">
           {/* Subtle Backdrop when Modal is Active */}

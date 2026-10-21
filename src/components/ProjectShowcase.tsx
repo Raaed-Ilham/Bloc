@@ -1,11 +1,14 @@
-import React, { useRef, useState, useEffect } from "react";
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
 import {
   motion,
+  useMotionValueEvent,
+  useReducedMotion,
   useScroll,
   useSpring,
   useTransform,
-  useMotionValueEvent,
-  useReducedMotion,
   type MotionValue,
 } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
@@ -20,8 +23,10 @@ interface Project {
   recognition: string[];
   description: string;
   imageUrl: string;
+  href?: string;
 }
 
+// Replace these sample entries with your own projects. No header is rendered here.
 const PROJECTS: Project[] = [
   {
     id: "luxe-residence",
@@ -34,7 +39,7 @@ const PROJECTS: Project[] = [
     description:
       "A minimalist concrete retreat set into coastal cliffs, built around raw materials and ambient light.",
     imageUrl:
-      "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=80&w=1200&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=85&w=1600&auto=format&fit=crop",
   },
   {
     id: "ceilao-villas",
@@ -50,7 +55,7 @@ const PROJECTS: Project[] = [
     description:
       "Modernist brutalism reimagined with wood-composite facades and open atrium courtyards.",
     imageUrl:
-      "https://images.unsplash.com/photo-1513694203232-719a280e022f?q=80&w=1200&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1513694203232-719a280e022f?q=85&w=1600&auto=format&fit=crop",
   },
   {
     id: "span-residences",
@@ -63,7 +68,7 @@ const PROJECTS: Project[] = [
     description:
       "A glass-encased studio designed around diffuse daylight and modular partition walls.",
     imageUrl:
-      "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?q=80&w=1200&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?q=85&w=1600&auto=format&fit=crop",
   },
   {
     id: "ikea-district",
@@ -76,237 +81,392 @@ const PROJECTS: Project[] = [
     description:
       "An elevated civic walkway and green canopy linking three historic districts with timber footbridges.",
     imageUrl:
-      "https://images.unsplash.com/photo-1600585152220-90363fe7e115?q=80&w=1200&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600585152220-90363fe7e115?q=85&w=1600&auto=format&fit=crop",
   },
 ];
 
 const N = PROJECTS.length;
-const ITEM_H = 190;
-const pad = (n: number) => String(n).padStart(2, "0");
+const ITEM_H = 220;
+const CARD_RATIO = 1.7; // width / height of every sheet
+const pad = (value: number) => String(value).padStart(2, "0");
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
-function useElementSize<T extends HTMLElement>() {
-  const ref = useRef<T | null>(null);
-  const [size, setSize] = useState({ width: 0, height: 0 });
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect;
-      setSize({ width, height });
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  return [ref, size] as const;
-}
+/* -------------------------------------------------------------------------- */
+/*  Shaders                                                                   */
+/* -------------------------------------------------------------------------- */
 
-function useImage(src: string) {
-  const [img, setImg] = useState<HTMLImageElement | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const image = new Image();
-    image.crossOrigin = "anonymous";
-    image.src = src;
-    image.onload = () => {
-      if (!cancelled) setImg(image);
-    };
-    return () => {
-      cancelled = true;
-    };
-  }, [src]);
-  return img;
-}
+/**
+ * The sheet is a unit plane scaled to card size inside the shader.
+ *
+ * Bend model: a fold line runs through the CENTER of the sheet (slightly
+ * rotated, so the curl is diagonal rather than perfectly horizontal). The half
+ * of the sheet on the "leading" side of that line is wrapped onto a circular
+ * arc, so the page curves away from its centre in the direction of the scroll.
+ * `uBend` is signed: positive curls the top half back, negative curls the
+ * bottom half back. After bending, a shear gives the diagonal parallelogram
+ * pose seen in the reference.
+ */
+const vertexShader = /* glsl */ `
+  uniform float uWidth;
+  uniform float uHeight;
+  uniform float uBend;       // -1..1, sign = curl direction
+  uniform float uMaxAngle;   // curl angle (radians) at |uBend| = 1
+  uniform vec2  uSkew;       // x: vertical edges lean, y: horizontal edges tilt
 
-function coverRect(img: HTMLImageElement, w: number, h: number) {
-  const ir = img.naturalWidth / img.naturalHeight;
-  const cr = w / h;
-  if (ir > cr) {
-    const sh = img.naturalHeight;
-    const sw = sh * cr;
-    return { sx: (img.naturalWidth - sw) / 2, sy: 0, sw, sh };
-  }
-  const sw = img.naturalWidth;
-  const sh = sw / cr;
-  return { sx: 0, sy: (img.naturalHeight - sh) / 2, sw, sh };
-}
+  varying vec2  vUv;
+  varying float vAngle;
 
-const SLICE_PX = 5;
-const MAX_SLICES = 140;
+  void main() {
+    vUv = uv;
+    vec3 p = vec3(position.x * uWidth, position.y * uHeight, 0.0);
 
-function drawCurl(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  w: number,
-  h: number,
-  bend: number,
-) {
-  ctx.clearRect(0, 0, w, h);
-  if (!img || w <= 0 || h <= 0) return;
+    // Fold-line normal: tilted so the curl travels along a diagonal.
+    float foldTilt = 0.34;
+    vec2 nrm = vec2(sin(foldTilt), cos(foldTilt));
+    float ext = 0.5 * (uHeight * nrm.y + uWidth * nrm.x);
 
-  const { sx, sy, sw, sh } = coverRect(img, w, h);
-  const b = Math.min(Math.max(bend, 0), 1);
+    float b = abs(uBend);
+    float dir = uBend >= 0.0 ? 1.0 : -1.0;
+    float s = max(dot(p.xy, nrm) * dir, 0.0); // distance past the centre fold
 
-  if (b < 0.01) {
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
-    return;
-  }
-
-  const slices = Math.min(MAX_SLICES, Math.max(24, Math.round(w / SLICE_PX)));
-  const sliceW = w / slices;
-  const curlStart = 1 - b * 0.85;
-  const maxAngle = b * (Math.PI / 2.1);
-  const radius = h * 0.22;
-
-  for (let i = 0; i < slices; i++) {
-    const t = i / slices;
-    const srcX = sx + t * sw;
-    const srcSliceW = sw / slices;
-
-    const angle =
-      t > curlStart ? ((t - curlStart) / (1 - curlStart)) * maxAngle : 0;
-    const foreshorten = Math.max(Math.cos(angle), 0.08);
-    const lift = Math.sin(angle) * radius;
-
-    const dw = sliceW * foreshorten;
-    const dx = t * w + (sliceW - dw) / 2;
-    const dy = -lift * 0.35;
-    const dh = h - lift * 0.12;
-
-    ctx.drawImage(img, srcX, sy, srcSliceW, sh, dx, dy, dw, dh);
-
-    if (angle > 0) {
-      const shade = Math.min(angle / maxAngle, 1);
-      ctx.fillStyle = `rgba(10,8,6,${shade * 0.55})`;
-      ctx.fillRect(dx, dy, dw, dh);
+    vAngle = 0.0;
+    if (b > 0.002 && s > 0.0) {
+      float total = b * uMaxAngle;
+      float radius = ext / total;
+      float th = s / radius;                  // 0 at centre, total at the edge
+      vAngle = th;
+      float newS = radius * sin(th);
+      p.xy += nrm * dir * (newS - s);         // arc in the page plane
+      p.z  -= radius * (1.0 - cos(th));       // and away from the viewer
     }
+
+    // Diagonal parallelogram pose (y is up).
+    p.xy = vec2(p.x - p.y * uSkew.x, p.y - p.x * uSkew.y);
+
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
+`;
 
-  const foldX = curlStart * w + (w - curlStart * w) * 0.35;
-  const grad = ctx.createLinearGradient(foldX - 14, 0, foldX + 14, 0);
-  grad.addColorStop(0, "rgba(255,255,255,0)");
-  grad.addColorStop(0.5, `rgba(255,255,255,${0.22 * b})`);
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(foldX - 14, 0, 28, h);
-}
+const fragmentShader = /* glsl */ `
+  uniform sampler2D uMap;
+  uniform float uOpacity;
+  uniform vec2 uUvScale;
 
-function CurledImage({
-  src,
-  bend,
+  varying vec2  vUv;
+  varying float vAngle;
+
+  void main() {
+    vec4 color;
+    float a = vAngle;
+
+    if (gl_FrontFacing) {
+      // "cover" crop so photos are never stretched
+      vec2 uv = (vUv - 0.5) * uUvScale + 0.5;
+      color = texture2D(uMap, uv);
+
+      // the curve darkens as it turns away, with a soft sheen where it starts
+      float shade = smoothstep(0.0, 1.6, a);
+      color.rgb *= 1.0 - 0.42 * shade;
+      float sheen = exp(-pow((a - 0.45) * 4.0, 2.0)) * smoothstep(0.03, 0.25, a);
+      color.rgb += vec3(0.12) * sheen;
+
+      float ed = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+      color.rgb *= 1.0 - 0.08 * (1.0 - smoothstep(0.0, 0.03, ed));
+    } else {
+      // reverse side of a curled page: pale paper fading to near-black
+      float k = smoothstep(1.5, 2.6, a);
+      color = vec4(mix(vec3(0.84, 0.83, 0.81), vec3(0.07), k * k), 1.0);
+    }
+
+    color.a *= uOpacity;
+    gl_FragColor = color;
+  }
+`;
+
+/* -------------------------------------------------------------------------- */
+/*  WebGL stage                                                               */
+/* -------------------------------------------------------------------------- */
+
+// Distance along the diagonal lane. Sheets that have already passed (t > 1)
+// compress toward a tight pile instead of continuing off-screen.
+const stackDistance = (t: number) =>
+  t <= 1 ? t : 1 + 0.16 * (1 - Math.exp(-(t - 1) * 0.9));
+
+function CurvedProjectStage({
+  progress,
+  reducedMotion,
 }: {
-  src: string;
-  bend: MotionValue<number>;
+  progress: MotionValue<number>;
+  reducedMotion: boolean;
 }) {
-  const [wrapRef, size] = useElementSize<HTMLDivElement>();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const img = useImage(src);
-  const dpr =
-    typeof window !== "undefined"
-      ? Math.min(window.devicePixelRatio || 1, 2)
-      : 1;
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx || !img || !size.width || !size.height) return;
+    if (!canvas) return;
 
-    canvas.width = size.width * dpr;
-    canvas.height = size.height * dpr;
-    canvas.style.width = `${size.width}px`;
-    canvas.style.height = `${size.height}px`;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let disposed = false;
+    let frame = 0;
+    let viewportWidth = window.innerWidth;
+    let viewportHeight = window.innerHeight;
+    let cardWidth = 400;
+    let cardHeight = cardWidth / CARD_RATIO;
 
-    let raf = 0;
-    const render = () =>
-      drawCurl(ctx, img, size.width, size.height, bend.get());
-    render();
+    let currentProgress = progress.get();
+    let lastProgress = currentProgress;
+    let lastTime = performance.now();
+    let velocity = 0; // smoothed projects-per-second, drives the live bend
 
-    const unsub = bend.on("change", () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(render);
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: true,
+      powerPreference: "high-performance",
+      premultipliedAlpha: false,
     });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setClearColor(0x000000, 0);
+    renderer.toneMapping = THREE.NoToneMapping;
+
+    const scene = new THREE.Scene();
+    const cameraDistance = 1800;
+    const camera = new THREE.PerspectiveCamera(35, 1, 1, 6000);
+    camera.position.set(0, 0, cameraDistance);
+
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin("anonymous");
+
+    // One unit plane shared by every sheet; width/height are shader uniforms,
+    // so resizing never rebuilds geometry. Dense in both axes because the
+    // fold line is diagonal.
+    const geometry = new THREE.PlaneGeometry(1, 1, 72, 72);
+
+    const meshes: THREE.Mesh[] = [];
+    const materials: THREE.ShaderMaterial[] = [];
+    const textures: THREE.Texture[] = [];
+    const loaded: boolean[] = PROJECTS.map(() => false);
+
+    PROJECTS.forEach((project, index) => {
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          uMap: { value: null },
+          uWidth: { value: cardWidth },
+          uHeight: { value: cardHeight },
+          uBend: { value: 0 },
+          uMaxAngle: { value: 2.5 },
+          uSkew: { value: new THREE.Vector2(0.17, 0.08) },
+          uUvScale: { value: new THREE.Vector2(1, 1) },
+          uOpacity: { value: 0 },
+        },
+        vertexShader,
+        fragmentShader,
+        transparent: true,
+        depthTest: true,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.visible = false;
+      mesh.frustumCulled = false; // vertices move in the shader
+      scene.add(mesh);
+      meshes.push(mesh);
+      materials.push(material);
+
+      loader.load(
+        project.imageUrl,
+        (texture) => {
+          if (disposed) {
+            texture.dispose();
+            return;
+          }
+          // Left as raw sRGB: the shader writes values straight to the canvas.
+          texture.colorSpace = THREE.NoColorSpace;
+          texture.anisotropy = Math.min(
+            4,
+            renderer.capabilities.getMaxAnisotropy(),
+          );
+          texture.minFilter = THREE.LinearMipmapLinearFilter;
+          texture.magFilter = THREE.LinearFilter;
+
+          const img = texture.image as { width: number; height: number };
+          const imageAspect = img.width / img.height;
+          const uvScale = material.uniforms.uUvScale.value as THREE.Vector2;
+          if (imageAspect > CARD_RATIO) {
+            uvScale.set(CARD_RATIO / imageAspect, 1);
+          } else {
+            uvScale.set(1, imageAspect / CARD_RATIO);
+          }
+
+          material.uniforms.uMap.value = texture;
+          textures.push(texture);
+          loaded[index] = true;
+          requestRender();
+        },
+        undefined,
+        () => {
+          console.warn(`Could not load showcase image: ${project.imageUrl}`);
+        },
+      );
+    });
+
+    function resize() {
+      if (disposed) return;
+      viewportWidth = window.innerWidth;
+      viewportHeight = window.innerHeight;
+      renderer.setSize(viewportWidth, viewportHeight, false);
+
+      const fov =
+        (2 * Math.atan(viewportHeight / (2 * cameraDistance)) * 180) / Math.PI;
+      camera.fov = fov;
+      camera.aspect = viewportWidth / Math.max(1, viewportHeight);
+      camera.updateProjectionMatrix();
+
+      const mobile = viewportWidth <= 620;
+      cardWidth = mobile
+        ? Math.min(viewportWidth * 0.8, 420)
+        : clamp(viewportWidth * 0.25, 320, 560);
+      cardHeight = cardWidth / CARD_RATIO;
+
+      materials.forEach((material) => {
+        material.uniforms.uWidth.value = cardWidth;
+        material.uniforms.uHeight.value = cardHeight;
+      });
+
+      requestRender();
+    }
+
+    function renderScene(now: number) {
+      frame = 0;
+      if (disposed) return;
+
+      // Smoothed scroll velocity -> pages flex in the direction of travel
+      // while moving and relax back to flat once the spring settles.
+      const dt = clamp((now - lastTime) / 1000, 0.008, 0.05);
+      lastTime = now;
+      const instant = (currentProgress - lastProgress) / dt;
+      lastProgress = currentProgress;
+      velocity += (instant - velocity) * Math.min(1, dt * 10);
+
+      const p = clamp(currentProgress, 0, N - 1);
+      const mobile = viewportWidth <= 620;
+
+      // Diagonal lane: stepping to the NEXT project moves down-left,
+      // previous projects sit up-right.
+      const centerX = mobile ? 0 : -viewportWidth * 0.012;
+      const centerY = viewportHeight * (mobile ? 0.02 : 0.05);
+      const spacingX = viewportWidth * (mobile ? 0.05 : 0.1);
+      const spacingY = Math.max(
+        viewportHeight * (mobile ? 0.34 : 0.37),
+        cardHeight * 1.25,
+      );
+
+      const dynamic = reducedMotion ? 0 : clamp(velocity * 0.16, -0.4, 0.4);
+
+      meshes.forEach((mesh, index) => {
+        const delta = index - p;
+        const past = delta < 0;
+        const t = Math.abs(delta);
+        const material = materials[index];
+
+        // position along the diagonal lane (passed sheets pile up at the top)
+        const e = past ? -stackDistance(t) : t;
+
+        // curl: past sheets curl upward (leading edge = direction of scroll),
+        // upcoming sheets curl gently downward. Eased so the bend starts the
+        // instant scrolling does.
+        const k = Math.min(t, 1);
+        const eased = 1 - (1 - k) * (1 - k);
+        const staticBend = past ? eased : -eased * 0.55;
+        const bend = clamp(staticBend + dynamic * (1 - eased * 0.8), -1, 1);
+
+        const opacity = past
+          ? clamp(1 - Math.max(0, t - 3) * 1.2, 0, 1)
+          : clamp(1 - Math.max(0, t - 1.2) * 2.5, 0, 1);
+
+        material.uniforms.uBend.value = bend;
+        material.uniforms.uOpacity.value = opacity;
+        mesh.visible = loaded[index] && opacity > 0.005;
+
+        mesh.position.x = centerX - e * spacingX;
+        mesh.position.y = centerY - e * spacingY;
+        mesh.position.z = -t * 40;
+        const scale = 1 - Math.min(t, 3) * 0.015;
+        mesh.scale.set(scale, scale, 1);
+        mesh.renderOrder = 100 - Math.round(t * 10);
+      });
+
+      renderer.render(scene, camera);
+
+      // keep animating until the live bend has fully relaxed
+      if (Math.abs(velocity) > 0.004 || Math.abs(instant) > 0) requestRender();
+    }
+
+    function requestRender() {
+      if (disposed || frame !== 0) return;
+      frame = window.requestAnimationFrame(renderScene);
+    }
+
+    const unsubscribe = progress.on("change", (value) => {
+      currentProgress = value;
+      requestRender();
+    });
+
+    window.addEventListener("resize", resize);
+    resize();
+    requestRender();
+
     return () => {
-      unsub();
-      cancelAnimationFrame(raf);
+      disposed = true;
+      unsubscribe();
+      window.removeEventListener("resize", resize);
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+      meshes.forEach((mesh) => scene.remove(mesh));
+      geometry.dispose();
+      materials.forEach((material) => material.dispose());
+      textures.forEach((texture) => texture.dispose());
+      renderer.dispose();
     };
-  }, [img, size.width, size.height, dpr, bend]);
+  }, [progress, reducedMotion]);
 
   return (
-    <div ref={wrapRef} className="absolute inset-0 overflow-hidden">
-      <canvas ref={canvasRef} className="block" />
-    </div>
+    <canvas
+      ref={canvasRef}
+      className="showcase-webgl-canvas"
+      aria-hidden="true"
+    />
   );
 }
 
-function Sheet({
-  project,
-  i,
-  p,
-}: {
-  project: Project;
-  i: number;
-  p: MotionValue<number>;
-}) {
-  const r = [i - 2, i - 1, i, i + 1, i + 2];
-  const y = useTransform(p, r, ["95vh", "46vh", "0vh", "-38vh", "-82vh"]);
-  const x = useTransform(p, r, ["-6vw", "-3vw", "0vw", "4vw", "9vw"]);
-  const rotateX = useTransform(p, r, [22, 14, 4, 12, 20]);
-  const rotateY = useTransform(p, r, [-14, -9, -4, -10, -16]);
-  const rotateZ = useTransform(p, r, [-6, -3, -1, 3, 8]);
-  const scale = useTransform(p, r, [0.9, 0.95, 1, 0.96, 0.9]);
-  const bend = useTransform(p, r, [0.85, 0.35, 0, 0.55, 0.9]);
-
-  return (
-    <motion.div
-      aria-hidden
-      className="absolute left-1/2 top-[56%] md:left-[50%]"
-      style={{
-        width: "clamp(250px, 40vw, 620px)",
-        height: "calc(clamp(250px, 40vw, 620px) * 0.72)",
-        marginLeft: "calc(clamp(250px, 40vw, 620px) / -2)",
-        marginTop: "calc(clamp(250px, 40vw, 620px) * 0.72 / -2)",
-        x,
-        y,
-        rotateX,
-        rotateY,
-        rotateZ,
-        scale,
-        zIndex: i,
-        transformStyle: "preserve-3d",
-        willChange: "transform",
-        boxShadow: "0 30px 60px -20px rgba(18,18,18,0.35)",
-        borderRadius: "2px",
-        overflow: "hidden",
-      }}
-    >
-      <CurledImage src={project.imageUrl} bend={bend} />
-    </motion.div>
-  );
-}
+/* -------------------------------------------------------------------------- */
+/*  DOM pieces                                                                */
+/* -------------------------------------------------------------------------- */
 
 function Fade({
-  p,
-  i,
+  progress,
+  index,
   className = "",
   children,
 }: {
-  p: MotionValue<number>;
-  i: number;
+  progress: MotionValue<number>;
+  index: number;
   className?: string;
   children: React.ReactNode;
 }) {
-  const opacity = useTransform(p, (v) =>
-    Math.max(0, 1 - Math.abs(v - i) * 2.2),
+  const opacity = useTransform(progress, (value) =>
+    clamp(1 - Math.abs(value - index) * 2.2, 0, 1),
   );
-  const filter = useTransform(
-    p,
-    (v) => `blur(${Math.min(Math.abs(v - i) * 18, 12)}px)`,
+  const blur = useTransform(
+    progress,
+    (value) => `blur(${Math.min(Math.abs(value - index) * 8, 8)}px)`,
   );
-  const y = useTransform(p, (v) => (i - v) * 26);
+  const y = useTransform(progress, (value) => (index - value) * 20);
+
   return (
     <motion.div
-      style={{ opacity, filter, y }}
-      className={`absolute inset-0 ${className}`}
+      className={`showcase-fade ${className}`}
+      style={{ opacity, filter: blur, y }}
     >
       {children}
     </motion.div>
@@ -315,232 +475,470 @@ function Fade({
 
 function ListItem({
   project,
-  i,
-  p,
+  index,
+  progress,
   onSelect,
 }: {
   project: Project;
-  i: number;
-  p: MotionValue<number>;
+  index: number;
+  progress: MotionValue<number>;
   onSelect: () => void;
 }) {
-  const opacity = useTransform(p, (v) =>
-    Math.max(0.18, 1 - Math.abs(v - i) * 0.6),
+  const opacity = useTransform(progress, (value) =>
+    Math.max(0.17, 1 - Math.abs(value - index) * 0.62),
   );
-  const scale = useTransform(p, (v) => 1 - Math.min(Math.abs(v - i), 2) * 0.04);
+  const scale = useTransform(
+    progress,
+    (value) => 1 - Math.min(Math.abs(value - index), 2) * 0.035,
+  );
+
   return (
-    <motion.button
-      type="button"
-      onClick={onSelect}
-      style={{ opacity, scale, top: i * ITEM_H - ITEM_H / 2, height: ITEM_H }}
-      className="absolute inset-x-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
+    <motion.a
+      href={`#project-${project.id}`}
+      onClick={(event) => {
+        event.preventDefault();
+        onSelect();
+      }}
+      style={{
+        opacity,
+        scale,
+        top: index * ITEM_H - ITEM_H / 2,
+        height: ITEM_H,
+      }}
+      className="showcase-list-item"
     >
-      <span className="text-xs text-[#73716b]">{project.category}</span>
-      <span className="text-2xl font-medium uppercase tracking-tight text-[#121212]">
-        {project.title}
-      </span>
-      <span className="h-px w-6 bg-[#121212]/40" />
-      <span className="line-clamp-3 max-w-[30ch] text-xs leading-relaxed text-[#73716b]">
-        {project.description}
-      </span>
-    </motion.button>
+      <span className="showcase-eyebrow">{project.category}</span>
+      <span className="showcase-list-title">{project.title}</span>
+      <span className="showcase-list-dash" />
+      <span className="showcase-list-description">{project.description}</span>
+    </motion.a>
   );
 }
 
 export default function ProjectShowcase() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const reduced = useReducedMotion();
+  const reducedMotion = useReducedMotion() ?? false;
   const [active, setActive] = useState(0);
 
   const { scrollYProgress } = useScroll({
     target: containerRef,
     offset: ["start start", "end end"],
   });
-
-  const smooth = useSpring(scrollYProgress, {
-    stiffness: 110,
-    damping: 26,
-    mass: 0.5,
+  const smoothProgress = useSpring(scrollYProgress, {
+    stiffness: 125,
+    damping: 30,
+    mass: 0.42,
   });
-
-  const p = useTransform(
-    reduced ? scrollYProgress : smooth,
-    (v) => v * (N - 1),
+  const progress = useTransform(
+    reducedMotion ? scrollYProgress : smoothProgress,
+    (value) => value * (N - 1),
   );
-  const listY = useTransform(p, (v) => -v * ITEM_H);
+  const listY = useTransform(progress, (value) => -value * ITEM_H);
 
-  useMotionValueEvent(p, "change", (v) => {
-    const r = Math.round(v);
-    if (r !== active) setActive(r);
+  useMotionValueEvent(progress, "change", (value) => {
+    const next = clamp(Math.round(value), 0, N - 1);
+    setActive((current) => (current === next ? current : next));
   });
 
-  const scrollToProject = (i: number) => {
-    const el = containerRef.current;
-    if (!el) return;
-    const top = el.getBoundingClientRect().top + window.scrollY;
-    const range = el.offsetHeight - window.innerHeight;
-    window.scrollTo({ top: top + (i / (N - 1)) * range, behavior: "smooth" });
+  const scrollToProject = (index: number) => {
+    const element = containerRef.current;
+    if (!element) return;
+    const top = element.getBoundingClientRect().top + window.scrollY;
+    const range = element.offsetHeight - window.innerHeight;
+    window.scrollTo({
+      top: top + (index / Math.max(1, N - 1)) * range,
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
   };
 
   return (
-    <div
-      ref={containerRef}
-      style={{ height: `${N * 100}vh` }}
-      className="relative bg-[#eae8e4] text-[#121212] architectural-grid-bg"
-    >
-      <div
-        className="sticky top-0 h-screen w-full overflow-hidden"
-        style={{ perspective: "1600px", perspectiveOrigin: "50% 40%" }}
-      >
-        {/* Header */}
-        <header className="absolute inset-x-0 top-0 z-30 flex items-start justify-between px-6 pt-6 text-xs font-mono-meta md:px-12">
-          <div className="font-bold tracking-tighter">
-            STUDIO ARCH.®
-            <span className="block text-[10px] font-normal text-[#73716b]">
-              © 2026
-            </span>
-          </div>
-          <nav className="hidden flex-col gap-0.5 text-lg font-medium leading-none tracking-tight md:flex">
-            <a href="#work" className="hover:opacity-50 transition-opacity">
-              → Work
-            </a>
-            <a href="/about" className="hover:opacity-50 transition-opacity">
-              About
-            </a>
-            <a href="#process" className="hover:opacity-50 transition-opacity">
-              Process
-            </a>
-            <a href="#contact" className="hover:opacity-50 transition-opacity">
-              Contact
-            </a>
-          </nav>
-          <a
-            href="mailto:inquiries@studioarch.com"
-            className="underline underline-offset-2"
-          >
-            For inquiries
-          </a>
-        </header>
+    <>
+      <style>{`
+        .showcase-root {
+          --showcase-bg: #efeeec;
+          --showcase-ink: #171715;
+          --showcase-muted: #777570;
+          position: relative;
+          color: var(--showcase-ink);
+          background: var(--showcase-bg);
+          font-family: Arial, Helvetica, sans-serif;
+          isolation: isolate;
+        }
 
-        {/* Curled sheets */}
-        <div
-          className="absolute inset-0 z-10"
-          style={{ transformStyle: "preserve-3d" }}
+        .showcase-scroll-space {
+          position: relative;
+          height: ${N * 100}vh;
+          height: ${N * 100}svh;
+          background: #efeeec;
+        }
+
+        .showcase-stage {
+          position: sticky;
+          top: 0;
+          width: 100%;
+          height: 100vh;
+          height: 100svh;
+          min-height: 520px;
+          overflow: hidden;
+          background: #efeeec;
+          isolation: isolate;
+        }
+
+        .showcase-webgl-canvas {
+          position: absolute;
+          z-index: 5;
+          inset: 0;
+          display: block;
+          width: 100%;
+          height: 100%;
+          pointer-events: none;
+          filter: drop-shadow(0 24px 25px rgba(20, 19, 18, 0.17));
+        }
+
+        .showcase-left-meta {
+          position: absolute;
+          z-index: 10;
+          left: clamp(20px, 3.2vw, 54px);
+          top: 41%;
+          width: 20%;
+          max-width: 260px;
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        .showcase-eyebrow,
+        .showcase-muted {
+          display: block;
+          color: var(--showcase-muted);
+          font-size: clamp(11px, 0.72vw, 14px);
+          line-height: 1.4;
+        }
+
+        .showcase-left-meta p {
+          margin: 14px 0 0;
+          max-width: 26ch;
+        }
+
+        .showcase-index {
+          position: absolute;
+          z-index: 12;
+          left: clamp(20px, 3.2vw, 54px);
+          bottom: 38px;
+          pointer-events: none;
+        }
+
+        .showcase-index-label {
+          display: block;
+          margin-bottom: 2px;
+          color: var(--showcase-muted);
+          font-size: 11px;
+          font-weight: 600;
+        }
+
+        .showcase-index-number {
+          display: block;
+          font-size: clamp(84px, 13.8vw, 202px);
+          font-weight: 700;
+          letter-spacing: -0.105em;
+          line-height: 0.82;
+        }
+
+        .showcase-index-total {
+          display: block;
+          margin: 12px 0 0 5px;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .showcase-list-window {
+          position: absolute;
+          z-index: 15;
+          top: 0;
+          right: clamp(20px, 4vw, 64px);
+          width: 26%;
+          height: 100%;
+          overflow: hidden;
+          mask-image: linear-gradient(
+            to bottom,
+            transparent,
+            #000 21%,
+            #000 79%,
+            transparent
+          );
+          -webkit-mask-image: linear-gradient(
+            to bottom,
+            transparent,
+            #000 21%,
+            #000 79%,
+            transparent
+          );
+        }
+
+        .showcase-list-track {
+          position: absolute;
+          inset: 50% 0 auto;
+        }
+
+        .showcase-list-item {
+          position: absolute;
+          inset-inline: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          padding: 16px 2px;
+          text-align: center;
+          text-decoration: none;
+          color: inherit;
+          cursor: pointer;
+        }
+
+        .showcase-list-title {
+          font-size: clamp(20px, 1.5vw, 30px);
+          font-weight: 400;
+          letter-spacing: -0.045em;
+          line-height: 1.05;
+          text-transform: uppercase;
+        }
+
+        .showcase-list-dash {
+          width: 14px;
+          height: 1px;
+          background: currentColor;
+          opacity: 0.32;
+        }
+
+        .showcase-list-description {
+          display: block;
+          max-width: 34ch;
+          color: #66645f;
+          font-size: clamp(13px, 0.9vw, 17px);
+          line-height: 1.45;
+        }
+
+        .showcase-fade {
+          position: absolute;
+          inset: 0;
+        }
+
+        .showcase-mobile-info {
+          display: none;
+        }
+
+        .showcase-footer {
+          position: absolute;
+          z-index: 20;
+          left: clamp(20px, 3.2vw, 54px);
+          right: clamp(20px, 3.2vw, 54px);
+          bottom: 17px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          color: var(--showcase-muted);
+          font-size: 11px;
+          pointer-events: none;
+        }
+
+        .showcase-footer span:last-child {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          color: var(--showcase-ink);
+        }
+
+        .showcase-progress-track {
+          position: absolute;
+          z-index: 25;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          height: 2px;
+          background: rgba(23, 23, 21, 0.07);
+        }
+
+        .showcase-progress-fill {
+          width: 100%;
+          height: 100%;
+          background: var(--showcase-ink);
+          transform-origin: left center;
+        }
+
+        @media (max-width: 900px) {
+          .showcase-left-meta {
+            display: none;
+          }
+
+          .showcase-list-window {
+            right: 20px;
+            width: 30%;
+          }
+
+          .showcase-list-description {
+            max-width: 28ch;
+          }
+          .showcase-index-number {
+            font-size: clamp(78px, 15vw, 140px);
+          }
+        }
+
+        @media (max-width: 620px) {
+          .showcase-scroll-space {
+            height: ${N * 92}svh;
+          }
+          .showcase-stage {
+            min-height: 560px;
+          }
+          .showcase-webgl-canvas {
+            filter: drop-shadow(0 16px 20px rgba(20, 19, 18, 0.16));
+          }
+          .showcase-list-window {
+            display: none;
+          }
+
+          .showcase-index {
+            left: 18px;
+            bottom: 57px;
+            width: 43%;
+          }
+
+          .showcase-index-label {
+            font-size: 10px;
+          }
+          .showcase-index-number {
+            font-size: clamp(70px, 21vw, 104px);
+          }
+          .showcase-index-total {
+            margin-top: 8px;
+            font-size: 11px;
+          }
+
+          .showcase-mobile-info {
+            position: absolute;
+            z-index: 15;
+            display: block;
+            right: 18px;
+            bottom: 20%;
+            width: 52%;
+            min-height: 120px;
+            text-align: right;
+          }
+
+          .showcase-mobile-info h2 {
+            margin: 6px 0 8px;
+            font-size: 19px;
+            font-weight: 400;
+            line-height: 1.05;
+            letter-spacing: -0.045em;
+            text-transform: uppercase;
+          }
+
+          .showcase-mobile-info p {
+            margin: 0;
+            color: #66645f;
+            font-size: 12px;
+            line-height: 1.4;
+          }
+
+          .showcase-mobile-info .showcase-eyebrow {
+            font-size: 11px;
+          }
+
+          .showcase-footer {
+            left: 18px;
+            right: 18px;
+            bottom: 14px;
+            font-size: 10px;
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .showcase-webgl-canvas {
+            filter: none;
+          }
+        }
+      `}</style>
+
+      <main className="showcase-root" id="work">
+        <section
+          ref={containerRef}
+          className="showcase-scroll-space"
+          aria-label="Selected projects"
         >
-          {PROJECTS.map((project, i) => (
-            <Sheet key={project.id} project={project} i={i} p={p} />
-          ))}
-        </div>
+          <div className="showcase-stage">
+            <CurvedProjectStage
+              progress={progress}
+              reducedMotion={reducedMotion}
+            />
 
-        {/* Left: metadata (md+) */}
-        <div className="pointer-events-none absolute left-6 top-40 hidden w-[24%] md:left-12 md:block z-20">
-          <p className="mb-6 text-xs text-[#73716b]">Selected work</p>
-          <div className="relative h-56">
-            {PROJECTS.map((project, i) => (
-              <Fade
-                key={project.id}
-                p={p}
-                i={i}
-                className="space-y-4 text-xs font-mono-meta"
+            <div className="showcase-left-meta" aria-hidden="true">
+              <span className="showcase-muted">Selected work</span>
+              <p>
+                Independent creative studio
+                <br />
+                Design · Digital · Direction
+              </p>
+            </div>
+
+            <div className="showcase-list-window" aria-label="Project list">
+              <motion.div className="showcase-list-track" style={{ y: listY }}>
+                {PROJECTS.map((project, index) => (
+                  <ListItem
+                    key={project.id}
+                    project={project}
+                    index={index}
+                    progress={progress}
+                    onSelect={() => scrollToProject(index)}
+                  />
+                ))}
+              </motion.div>
+            </div>
+
+            <div className="showcase-mobile-info" aria-live="polite">
+              {PROJECTS.map((project, index) => (
+                <Fade key={project.id} progress={progress} index={index}>
+                  <span className="showcase-eyebrow">{project.category}</span>
+                  <h2>{project.title}</h2>
+                  <p>{project.description}</p>
+                </Fade>
+              ))}
+            </div>
+
+            <div className="showcase-index" aria-hidden="true">
+              <span className="showcase-index-label">Selected work</span>
+              <motion.span
+                className="showcase-index-number"
+                key={active}
+                initial={
+                  reducedMotion
+                    ? false
+                    : { opacity: 0, y: 24, filter: "blur(10px)" }
+                }
+                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
               >
-                <div>
-                  <span className="mb-1 block text-[10px] text-[#73716b]">
-                    Client
-                  </span>
-                  {project.client}
-                </div>
-                <div>
-                  <span className="mb-1 block text-[10px] text-[#73716b]">
-                    Role
-                  </span>
-                  {project.role}
-                </div>
-                <div>
-                  <span className="mb-1 block text-[10px] text-[#73716b]">
-                    Launch
-                  </span>
-                  {project.launch}
-                </div>
-                <div>
-                  <span className="mb-1 block text-[10px] text-[#73716b]">
-                    Recognition
-                  </span>
-                  {project.recognition.map((r) => (
-                    <div key={r}>{r}</div>
-                  ))}
-                </div>
-              </Fade>
-            ))}
-          </div>
-        </div>
+                {pad(active + 1)}
+              </motion.span>
+              <span className="showcase-index-total">/{pad(N)}</span>
+            </div>
 
-        {/* Bottom-left: giant index + title */}
-        <div className="pointer-events-none absolute bottom-16 left-6 z-20 md:bottom-10 md:left-12">
-          <div className="relative h-[5.5rem] w-[15rem] md:h-[13rem] md:w-[26rem]">
-            {PROJECTS.map((project, i) => (
-              <Fade key={project.id} p={p} i={i}>
-                <span className="block text-[5.5rem] font-bold leading-none tracking-tighter md:text-[12rem]">
-                  {pad(i + 1)}
-                </span>
-              </Fade>
-            ))}
-          </div>
-          <span className="ml-1 text-xs font-mono-meta text-[#73716b]">
-            /{pad(N)}
-          </span>
-          <div className="relative mt-2 h-6 md:hidden">
-            {PROJECTS.map((project, i) => (
-              <Fade
-                key={project.id}
-                p={p}
-                i={i}
-                className="text-sm font-semibold uppercase"
-              >
-                {project.title}
-              </Fade>
-            ))}
-          </div>
-        </div>
+            <footer className="showcase-footer">
+              <span>Scroll to explore</span>
+              <span>
+                Project {active + 1} of {N}
+                <ArrowUpRight size={13} />
+              </span>
+            </footer>
 
-        {/* Right: scroll-linked project list (md+) */}
-        <div
-          className="absolute right-8 top-0 z-20 hidden h-full w-[26%] md:block"
-          style={{
-            maskImage:
-              "linear-gradient(to bottom, transparent, black 25%, black 75%, transparent)",
-            WebkitMaskImage:
-              "linear-gradient(to bottom, transparent, black 25%, black 75%, transparent)",
-          }}
-        >
-          <motion.div
-            className="absolute inset-x-0 top-1/2"
-            style={{ y: listY }}
-          >
-            {PROJECTS.map((project, i) => (
-              <ListItem
-                key={project.id}
-                project={project}
-                i={i}
-                p={p}
-                onSelect={() => scrollToProject(i)}
+            <div className="showcase-progress-track" aria-hidden="true">
+              <motion.div
+                className="showcase-progress-fill"
+                style={{ scaleX: scrollYProgress }}
               />
-            ))}
-          </motion.div>
-        </div>
-
-        {/* Footer */}
-        <footer className="absolute inset-x-0 bottom-0 z-30 flex items-center justify-between px-6 pb-4 text-xs font-mono-meta text-[#73716b] md:px-12">
-          <span>Scroll</span>
-          <span className="flex items-center gap-1">
-            Project {active + 1} of {N}
-            <ArrowUpRight className="h-3.5 w-3.5" />
-          </span>
-        </footer>
-        <motion.div
-          className="absolute inset-x-0 bottom-0 z-30 h-0.5 origin-left bg-[#121212]"
-          style={{ scaleX: scrollYProgress }}
-        />
-      </div>
-    </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </>
   );
 }

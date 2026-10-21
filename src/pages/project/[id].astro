@@ -1,0 +1,87 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import ProjectDetail from '../../components/ProjectDetail';
+
+// Generate static routes at build time for each project ID
+export async function getStaticPaths() {
+  const projects = [
+    {
+      id: "luxe-residence",
+      title: "Luxe Residence",
+      client: "Luxe Group",
+      category: "Residential Architecture",
+      role: "Lead Architect & Design Director",
+      launch: "October 2025",
+      liveUrl: "https://example.com",
+      recognition: ["AIA Honor Award 2025", "ArchDaily Building of the Year", "CSSDA Site of the Day"],
+      about: "I've been following the client's vision for a long time, so it was a great opportunity to redesign their residential cliffside retreat. The challenge was taking their unique, minimalist aesthetic and turning it into a smooth, seamless architectural experience. Every part of the site, from the material palette to spatial transitions, was carefully chosen to match their personality.",
+      gallery: [
+        "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600585152220-90363fe7e115?q=80&w=1200&auto=format&fit=crop"
+      ]
+    },
+    {
+      id: "ceilao-villas",
+      title: "Ceilao Villas",
+      client: "Ceilao",
+      category: "Public & Cultural",
+      role: "Facade Engineering & Concept",
+      launch: "June 2025",
+      liveUrl: "https://example.com",
+      recognition: ["World Architecture Festival Finalist", "Frame Awards Winner"],
+      about: "Modernist brutalism reimagined with wood-composite facades and open atrium courtyards. Designed to bridge public civic space with private cultural exhibition halls.",
+      gallery: [
+        "https://images.unsplash.com/photo-1513694203232-719a280e022f?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1512917774080-9991f1c4c750?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=80&w=1200&auto=format&fit=crop"
+      ]
+    },
+    {
+      id: "span-residences",
+      title: "Span Residences",
+      client: "MiuX Studio",
+      category: "Commercial & Workspace",
+      role: "Interior Architecture",
+      launch: "January 2026",
+      liveUrl: "https://example.com",
+      recognition: ["Interior Design Best of Year", "Design Anthology Award"],
+      about: "A glass-encased creative workspace designed around diffuse daylight, acoustic isolation, and modular partition walls.",
+      gallery: [
+        "https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?q=80&w=1200&auto=format&fit=crop"
+      ]
+    },
+    {
+      id: "ikea-district",
+      title: "Ikea District",
+      client: "Ikea",
+      category: "Urban Masterplan",
+      role: "Principal Urban Planner",
+      launch: "March 2026",
+      liveUrl: "https://example.com",
+      recognition: ["ULI Excellence Award", "Global Architecture Citation"],
+      about: "An elevated civic walkway and green canopy linking three historic downtown districts with timber footbridges and rainwater filtration gardens.",
+      gallery: [
+        "https://images.unsplash.com/photo-1600585152220-90363fe7e115?q=80&w=1200&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1600573472550-8090b5e0745e?q=80&w=1200&auto=format&fit=crop"
+      ]
+    }
+  ];
+
+  return projects.map((project) => ({
+    params: { id: project.id },
+    props: { project }
+  }));
+}
+
+const { project } = Astro.props;
+---
+
+<Layout title={`${project.title} — STUDIO ARCH.®`}>
+  <main class="w-full min-h-screen bg-[#eae8e4]">
+    <ProjectDetail project={project} client:load />
+  </main>
+</Layout>
