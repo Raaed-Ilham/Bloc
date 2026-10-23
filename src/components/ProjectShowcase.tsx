@@ -254,8 +254,8 @@ function CurvedProjectStage({
           uWidth: { value: cardWidth },
           uHeight: { value: cardHeight },
           uBend: { value: 0 },
-          uMaxAngle: { value: 2.5 },
-          uSkew: { value: new THREE.Vector2(0.17, 0.08) },
+          uMaxAngle: { value: 0.62 },
+          uSkew: { value: new THREE.Vector2(0, 0) },
           uUvScale: { value: new THREE.Vector2(1, 1) },
           uOpacity: { value: 0 },
         },
@@ -324,9 +324,11 @@ function CurvedProjectStage({
       camera.updateProjectionMatrix();
 
       const mobile = viewportWidth <= 620;
-      cardWidth = mobile
-        ? Math.min(viewportWidth * 0.8, 420)
-        : clamp(viewportWidth * 0.25, 320, 560);
+      cardWidth =
+        1.3 *
+        (mobile
+          ? Math.min(viewportWidth * 0.8, 420)
+          : clamp(viewportWidth * 0.25, 320, 560));
       cardHeight = cardWidth / CARD_RATIO;
 
       materials.forEach((material) => {
@@ -362,7 +364,7 @@ function CurvedProjectStage({
         cardHeight * 1.25,
       );
 
-      const dynamic = reducedMotion ? 0 : clamp(velocity * 0.16, -0.4, 0.4);
+      const dynamic = reducedMotion ? 0 : clamp(velocity * 0.075, -0.16, 0.16);
 
       meshes.forEach((mesh, index) => {
         const delta = index - p;
@@ -373,13 +375,15 @@ function CurvedProjectStage({
         // position along the diagonal lane (passed sheets pile up at the top)
         const e = past ? -stackDistance(t) : t;
 
-        // curl: past sheets curl upward (leading edge = direction of scroll),
-        // upcoming sheets curl gently downward. Eased so the bend starts the
-        // instant scrolling does.
+        // Keep the current/center sheet completely flat. Neighbouring sheets
+        // get only a subtle curl, with a small scroll-direction wiggle layered on.
         const k = Math.min(t, 1);
         const eased = 1 - (1 - k) * (1 - k);
-        const staticBend = past ? eased : -eased * 0.55;
-        const bend = clamp(staticBend + dynamic * (1 - eased * 0.8), -1, 1);
+        const centerBlend = clamp(t / 0.32, 0, 1);
+        const staticBend = past ? eased * 0.24 : -eased * 0.14;
+        const scrollWiggle = dynamic * (1 - eased * 0.65) * centerBlend;
+        const bend =
+          t < 0.025 ? 0 : clamp(staticBend + scrollWiggle, -0.3, 0.3);
 
         const opacity = past
           ? clamp(1 - Math.max(0, t - 3) * 1.2, 0, 1)
@@ -387,8 +391,14 @@ function CurvedProjectStage({
 
         material.uniforms.uBend.value = bend;
         material.uniforms.uOpacity.value = opacity;
-        mesh.visible = loaded[index] && opacity > 0.005;
 
+        // Let the surrounding sheets sit diagonally, but ease the active sheet
+        // into a clean rectangular shape as it reaches the center.
+        const skewAmount = clamp(t / 0.9, 0, 1);
+        const skew = material.uniforms.uSkew.value as THREE.Vector2;
+        skew.set(0.17 * skewAmount, 0.08 * skewAmount);
+
+        mesh.visible = loaded[index] && opacity > 0.005;
         mesh.position.x = centerX - e * spacingX;
         mesh.position.y = centerY - e * spacingY;
         mesh.position.z = -t * 40;
